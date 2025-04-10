@@ -1,92 +1,180 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include "lexer.h"
-#include "parser.h"
-#include "ast.h"
-#include "semantic_analyzer.h"
-#include "llvm_ir_generator.h"
-#include "error_handling.h"
-#include "target_info.h"
+#include <string.h>
+#include "linker.h"
+#include "symbol_resolution.h"
+#include "relocation.h"
+#include "object_file_format.h"
+#include "executable_file_format.h"
 
 int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <input_source_file>\n", argv[0]);
+    if (argc < 3) {
+        fprintf(stderr, "Usage: %s <output_executable> <object_file1> [object_file2 ...]\n", argv[0]);
         return 1;
     }
 
-    const char *input_filename = argv[1];
-    FILE *input_file = fopen(input_filename, "r");
-    if (!input_file) {
-        perror("Error opening input file");
+    const char *output_executable_filename = argv[1];
+    object_file_t *head = NULL;
+    object_file_t *tail = NULL;
+
+    // Load all object files
+    for (int i = 2; i < argc; ++i) {
+        object_file_t *obj = load_object_file(argv[i]);
+        if (obj) {
+            if (!head) {
+                head = obj;
+                tail = obj;
+            } else {
+                tail->next = obj;
+                tail = obj;
+            }
+        } else {
+            fprintf(stderr, "Error loading object file: %s\n", argv[i]);
+            // Free any already loaded object files
+            object_file_t *current = head;
+            while (current) {
+                object_file_t *next = current->next;
+                free_object_file(current);
+                current = next;
+            }
+            return 1;
+        }
+    }
+
+    if (!head) {
+        fprintf(stderr, "No object files to link.\n");
         return 1;
     }
 
-    // Read the entire source file into a buffer
-    fseek(input_file, 0, SEEK_END);
-    long file_size = ftell(input_file);
-    fseek(input_file, 0, SEEK_SET);
-
-    char *source_code = (char *)malloc(file_size + 1);
-    if (!source_code) {
-        perror("Memory allocation failed for source code");
-        fclose(input_file);
+    // Resolve global symbols
+    global_symbol_t *global_symbol_table = resolve_symbols(head);
+    if (!global_symbol_table) {
+        fprintf(stderr, "Symbol resolution failed.\n");
+        // Free loaded object files
+        object_file_t *current = head;
+        while (current) {
+            object_file_t *next = current->next;
+            free_object_file(current);
+            current = next;
+        }
         return 1;
     }
 
-    if (fread(source_code, 1, file_size, input_file) != file_size) {
-        perror("Error reading source file");
-        free(source_code);
-        fclose(input_file);
-        return 1;
-    }
-    source_code[file_size] = '\0'; // Null-terminate the source code
-
-    fclose(input_file);
-
-    // Initialize the lexer with the source code
-    lexer_init(source_code);
-
-    // Initialize the parser
-    parser_init();
-
-    // Parse the source code into an Abstract Syntax Tree
-    ast_node_t *root = parse_program();
-
-    if (get_error_count() > 0) {
-        fprintf(stderr, "Parsing failed due to %d errors.\n", get_error_count());
-        free_ast(root);
-        free(source_code);
-        return 1;
+    // Calculate total code and data sizes
+    uint64_t total_code_size = 0;
+    uint64_t total_data_size = 0;
+    object_file_t *current_obj = head;
+    while (current_obj) {
+        total_code_size += current_obj->code_size;
+        total_data_size += current_obj->data_size;
+        current_obj = current_obj->next;
     }
 
-    // Initialize the semantic analyzer
-    semantic_analyzer_init();
+    // Allocate memory for the linked code and data
+    uint8_t *linked_code = (uint8_t *)malloc(total_code_size);
+    uint8_t *linked_data = (uint8_t *)malloc(total_data_size);
+    if (!linked_code && total_code_size > 0 || !linked_data && total_data_size > 0) {
+        perror("Memory allocation failed for linked sections");
+        free_global_symbol_table(global_symbol_table);
+        // Free loaded object files
+        current_obj = head;
+        while (current_obj) {
+            object_file_t *next = current_obj->next;
+            free_object_file(current_obj);
+            current_obj = next;
+        }
+        free(linked_code);
+        free(linked_data);
+        return 1;
+    }
+    if (linked_code) memset(linked_code, 0, total_code_size);
+    if (linked_data) memset(linked_data, 0, total_data_size);
 
-    // Perform semantic analysis on the AST
-    analyze_ast(root);
+    // Copy code and data sections into the linked memory
+    uint64_t current_code_offset = 0;
+    uint64_t current_data_offset = 0;
+    current_obj = head;
+    while (current_obj) {
+        if (current_obj->code_section) {
+            memcpy(linked_code + current_code_offset, current_obj->code_section, current_obj->code_size);
+            current_code_offset += current_obj->code_size;
+        }
+        if (current_obj->data_section) {
+            memcpy(linked_data + current_data_offset, current_obj->data_section, current_obj->data_size);
+            current_data_offset += current_obj->data_size;
+        }
+        current_obj = current_obj->next;
+    }
 
-    if (get_error_count() > 0) {
-        fprintf(stderr, "Semantic analysis failed due to %d errors.\n", get_error_count());
-        free_ast(root);
-        free(source_code);
+    // Perform relocations
+    if (!perform_relocations(head, global_symbol_table, linked_code, linked_data)) {
+        fprintf(stderr, "Relocation failed.\n");
+        free_global_symbol_table(global_symbol_table);
+        // Free loaded object files and linked sections
+        current_obj = head;
+        while (current_obj) {
+            object_file_t *next = current_obj->next;
+            free_object_file(current_obj);
+            current_obj = next;
+        }
+        free(linked_code);
+        free(linked_data);
         return 1;
     }
 
-    // Initialize the LLVM IR generator
-    llvm_ir_generator_init();
+    // Find the entry point symbol (e.g., "main" or "_start")
+    global_symbol_t *entry_point_symbol = find_global_symbol(global_symbol_table, "main"); // Or "_start"
+    uint64_t entry_point_address = 0;
+    if (entry_point_symbol) {
+        entry_point_address = entry_point_symbol->address;
+    } else {
+        fprintf(stderr, "Warning: Entry point symbol 'main' not found, assuming start at address 0.\n");
+    }
 
-    // Generate LLVM IR from the AST
-    generate_llvm_ir(root);
+    // Create the executable file
+    FILE *outfile = fopen(output_executable_filename, "wb");
+    if (!outfile) {
+        perror("Error opening output executable file");
+        free_global_symbol_table(global_symbol_table);
+        // Free loaded object files and linked sections
+        current_obj = head;
+        while (current_obj) {
+            object_file_t *next = current_obj->next;
+            free_object_file(current_obj);
+            current_obj = next;
+        }
+        free(linked_code);
+        free(linked_data);
+        return 1;
+    }
 
-    // Optionally, you could output the generated LLVM IR to a file here
-     For example:
-     FILE *output_ir_file = fopen("output.ll", "w");
-    // (You would need to modify generate_llvm_ir to write to this file)
-     fclose(output_ir_file);
+    // Write the executable file header
+    executable_file_header_t header;
+    header.magic = SDSCKS_EXECUTABLE_MAGIC;
+    header.version = EXECUTABLE_FILE_VERSION;
+    header.code_size = total_code_size;
+    header.data_size = total_data_size;
+    header.entry_point = entry_point_address;
 
-    // Clean up allocated memory
-    free_ast(root);
-    free(source_code);
+    fwrite(&header, sizeof(executable_file_header_t), 1, outfile);
+
+    // Write the linked code and data sections
+    if (linked_code) fwrite(linked_code, 1, total_code_size, outfile);
+    if (linked_data) fwrite(linked_data, 1, total_data_size, outfile);
+
+    fclose(outfile);
+    printf("Successfully linked and created executable: %s\n", output_executable_filename);
+
+    // Free all allocated memory
+    free_global_symbol_table(global_symbol_table);
+    current_obj = head;
+    while (current_obj) {
+        object_file_t *next = current_obj->next;
+        free_object_file(current_obj);
+        current_obj = next;
+    }
+    free(linked_code);
+    free(linked_data);
 
     return 0;
 }
