@@ -1,2 +1,9 @@
 # SDSCKS Sahne Dünya Virtual CPU Instruction Set)
 SDSCKS is a Virtual CPU instruction set developed by Sahne Dünya. Sahne Dünya is known for its RISC-V ecosystem, but that does not mean that it will not create its own instruction set. But unfortunately, the answer to this is not SDSCKS because this is an open source Virtual CPU project and cannot be directly adapted to a real CPU. The aim of this project is to expand the Virtual Machine World. Because when choosing a CPU instruction set in a Virtual Machine, you can always choose the architectures used in real CPUs, Sahne Dünya wanted to add Virtual CPUs among these options thanks to this project. At the same time, this instruction set has its own Assembly language, Compiler and linker and Virtual Machine. The codes in SDSCKS Assembly language are completely specific to that instruction set, so it is necessary to use a special SDSCKS compiler to run the code, but all the codes compiled in this special compiler will not be able to run without a Virtual Machine, you will have produced a software that can only run in a Virtual Machine. The Standard C compiler of the SDSCKS instruction set complies with the Ahead-of-Time - AOT principle used in many compilers, and generally offers the instruction sets used in real CPUs in compilers that comply with this principle, although SDSCKS is a Virtual CPU Instruction set, it adds such features, but in the end, the main reason why this software can only run in a Virtual Machine is that the SDSCKS architecture cannot be directly adapted to a real CPU. However, CPU instruction sets that can be adapted to a Real CPU can use this infrastructure.
+
+# Basic features
+3. Target source file: 27 MB
+5. Main programming language: C
+6. Target Electronic device: Virtual Machine
+7. Instruction set complexity: RISC
+8. Adaptability to real CPU: No, But real CPU architectures can use this infrastructure
